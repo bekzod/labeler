@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>JSONL Labeler</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script defer src="/static/app.js"></script>
+  </head>
+  <body>
+    <main class="app">
+      <header class="card header">
+        <div>
+          <h1>JSONL Labeler</h1>
+          <p id="jsonlPath" class="muted"></p>
+        </div>
+        <div class="header-actions">
+          <button id="commitBtn" class="btn btn-primary">Write JSONL</button>
+        </div>
+      </header>
+
+      <section class="card controls">
+        <div class="row-group">
+          <button id="prevBtn" class="btn">Prev (J)</button>
+          <label class="inline-field">
+            Row
+            <input id="indexInput" type="number" min="1" step="1" />
+          </label>
+          <span id="positionLabel" class="badge">0 / 0</span>
+          <button id="nextBtn" class="btn">Next (K)</button>
+          <button id="playBtn" class="btn">Play (Space)</button>
+          <label class="checkbox-item"><input id="autoplayToggle" type="checkbox" checked /> Autoplay</label>
+          <button id="deleteBtn" class="btn btn-danger">Delete (D)</button>
+          <button id="revertRowBtn" class="btn">Revert Row (R)</button>
+          <button id="revertAllBtn" class="btn">Revert All (Shift+R)</button>
+        </div>
+        <div class="output-grid">
+          <label>
+            Output JSONL (blank = in-place)
+            <input id="outputPathInput" type="text" placeholder="/path/to/output.jsonl" />
+          </label>
+          <label>
+            Deleted Rows JSONL
+            <input id="deletedOutputInput" type="text" placeholder="/path/to/deleted.jsonl" />
+          </label>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="card editor-panel">
+          <h2>Editable Transcript</h2>
+
+          <div class="source-picker">
+            <button id="pickTextBtn" class="source-choice" type="button">
+              <span class="source-name">text (A)</span>
+              <span id="textSource" class="source-preview"></span>
+            </button>
+            <button id="pickHypBtn" class="source-choice" type="button">
+              <span class="source-name">model_hypothesis (S)</span>
+              <span id="hypSource" class="source-preview"></span>
+            </button>
+            <button id="pickLikelyTextBtn" class="source-choice" type="button">
+              <span class="source-name">likely_bad_text (Q)</span>
+              <span id="likelyBadTextSource" class="source-preview"></span>
+            </button>
+            <button id="pickLikelyHypBtn" class="source-choice" type="button">
+              <span class="source-name">likely_bad_model_text (W)</span>
+              <span id="likelyBadModelSource" class="source-preview"></span>
+            </button>
+          </div>
+
+          <textarea id="editInput" spellcheck="false"></textarea>
+          <p class="muted shortcuts">
+            K next, J prev, A/S source, Q/W likely bad source, Left/Right source, Space play, D delete, R revert row, Shift+R revert all, Autoplay on row switch, Ctrl/Cmd+Enter write.
+          </p>
+        </article>
+
+        <article class="card details-panel">
+          <h2>Current Row</h2>
+
+          <div class="meta-grid">
+            <div><span>Audio</span><code id="audioPath"></code></div>
+            <div><span>Duration</span><code id="duration"></code></div>
+            <div><span>WER</span><code id="wer"></code></div>
+            <div><span>CER</span><code id="cer"></code></div>
+            <div><span>Bucket</span><code id="bucket"></code></div>
+            <div><span>Suspicion</span><code id="suspicion"></code></div>
+          </div>
+        </article>
+      </section>
+
+      <footer class="card statusbar">
+        <span id="statusText">Ready</span>
+        <span id="countText">edited: 0, deleted: 0</span>
+      </footer>
+
+      <audio id="audioPlayer" preload="metadata"></audio>
+    </main>
+  </body>
+</html>

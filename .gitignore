@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.label_state.json
+*.bak.*
+*.tmp
+.DS_Store
