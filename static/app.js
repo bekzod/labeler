@@ -54,15 +54,32 @@ function clampIndex(index, totalRows) {
   return Math.max(0, Math.min(totalRows - 1, index));
 }
 
+function parseRequestedRow(rawValue, totalRows) {
+  if (totalRows <= 0) return 1;
+  const fallback = 1;
+  const maxRow = totalRows;
+  const raw = String(rawValue ?? "").trim();
+  if (!raw) return fallback;
+
+  // Accept only integer-like input; decimals are truncated for compatibility.
+  const numeric = Number(raw);
+  if (!Number.isFinite(numeric)) {
+    // Very large integer strings can parse as Infinity; clamp to final row.
+    if (/^\d+$/.test(raw)) return maxRow;
+    return fallback;
+  }
+
+  const requested = Math.trunc(numeric);
+  if (requested < 1) return 1;
+  if (requested > maxRow) return maxRow;
+  return requested;
+}
+
 function getRequestedRowIndex(totalRows) {
   const params = new URLSearchParams(window.location.search);
   const rawRow = params.get("row");
-  if (!rawRow) return 0;
-
-  const parsed = Number(rawRow);
-  if (!Number.isFinite(parsed)) return 0;
-
-  return clampIndex(Math.trunc(parsed) - 1, totalRows);
+  const requestedRow = parseRequestedRow(rawRow, totalRows);
+  return requestedRow - 1;
 }
 
 function syncRowQuery(index) {
@@ -102,7 +119,8 @@ function sourceText(row, source) {
   if (!row) return "";
   if (source === "model_hypothesis") return String(row.model_hypothesis ?? "");
   if (source === "likely_bad_text") return String(row.likely_bad_text ?? "");
-  if (source === "likely_bad_model_text") return String(row.likely_bad_model_text ?? "");
+  if (source === "likely_bad_model_text")
+    return String(row.likely_bad_model_text ?? "");
   return String(row.text ?? "");
 }
 
@@ -138,6 +156,10 @@ function highlightWholeWordMarkup(textValue, tokenValue) {
   return html;
 }
 
+function isTextHypothesisMatch(textValue, hypValue) {
+  return String(textValue ?? "").trim() === String(hypValue ?? "").trim();
+}
+
 function setStatus(text) {
   els.statusText.textContent = text;
 }
@@ -166,9 +188,23 @@ function maybeAutoPlayCurrentRow() {
 
 function updateSourceChoiceHighlight() {
   els.pickTextBtn.classList.toggle("active", state.selectedSource === "text");
-  els.pickHypBtn.classList.toggle("active", state.selectedSource === "model_hypothesis");
-  els.pickLikelyTextBtn.classList.toggle("active", state.selectedSource === "likely_bad_text");
-  els.pickLikelyHypBtn.classList.toggle("active", state.selectedSource === "likely_bad_model_text");
+  els.pickHypBtn.classList.toggle(
+    "active",
+    state.selectedSource === "model_hypothesis",
+  );
+  els.pickLikelyTextBtn.classList.toggle(
+    "active",
+    state.selectedSource === "likely_bad_text",
+  );
+  els.pickLikelyHypBtn.classList.toggle(
+    "active",
+    state.selectedSource === "likely_bad_model_text",
+  );
+}
+
+function updateMatchHighlight(isMatch) {
+  els.pickTextBtn.classList.toggle("match-ok", isMatch);
+  els.pickHypBtn.classList.toggle("match-ok", isMatch);
 }
 
 function updatePosition() {
@@ -206,21 +242,25 @@ function renderRowPayload(payload) {
 
   const row = payload.row;
   els.audioPath.textContent = String(row.audio_filepath ?? "");
-  els.duration.textContent = row.duration != null ? Number(row.duration).toFixed(3) : "";
+  els.duration.textContent =
+    row.duration != null ? Number(row.duration).toFixed(3) : "";
   els.wer.textContent = row.wer != null ? String(row.wer) : "";
   els.cer.textContent = row.cer != null ? String(row.cer) : "";
   els.bucket.textContent = String(row.bucket ?? "");
-  els.suspicion.textContent = row.suspicion_score != null ? String(row.suspicion_score) : "";
+  els.suspicion.textContent =
+    row.suspicion_score != null ? String(row.suspicion_score) : "";
 
   const textValue = sourceText(row, "text");
   const hypValue = sourceText(row, "model_hypothesis");
   const likelyText = sourceText(row, "likely_bad_text");
   const likelyHyp = sourceText(row, "likely_bad_model_text");
+  const textHypMatch = isTextHypothesisMatch(textValue, hypValue);
 
   els.textSource.innerHTML = highlightWholeWordMarkup(textValue, likelyText);
   els.hypSource.innerHTML = highlightWholeWordMarkup(hypValue, likelyHyp);
   els.likelyBadTextSource.textContent = likelyText;
   els.likelyBadModelSource.textContent = likelyHyp;
+  updateMatchHighlight(textHypMatch);
 
   const audioPath = encodeURIComponent(String(row.audio_filepath ?? ""));
   els.audioPlayer.src = `/api/audio?path=${audioPath}`;
@@ -289,9 +329,9 @@ async function moveBy(delta) {
 }
 
 async function jumpToIndex() {
-  const requested = Number(els.indexInput.value);
-  if (!Number.isFinite(requested)) return;
-  const next = clampIndex(Math.trunc(requested) - 1, state.totalRows);
+  const requestedRow = parseRequestedRow(els.indexInput.value, state.totalRows);
+  const next = requestedRow - 1;
+  els.indexInput.value = String(requestedRow);
   if (next === state.index) return;
 
   if (state.dirty) await saveCurrentRow(true);
@@ -354,7 +394,7 @@ async function writeJsonl() {
   const inPlace = !els.outputPathInput.value.trim();
   if (inPlace) {
     const ok = window.confirm(
-      "Write in-place to source JSONL? A timestamped backup will be created automatically."
+      "Write in-place to source JSONL? A timestamped backup will be created automatically.",
     );
     if (!ok) return;
   }
@@ -375,7 +415,7 @@ async function writeJsonl() {
 
     const backup = result.backup_path ? ` backup: ${result.backup_path}` : "";
     setStatus(
-      `Wrote ${result.kept_rows} rows, deleted ${result.deleted_rows}, changed ${result.changed_rows}.${backup}`
+      `Wrote ${result.kept_rows} rows, deleted ${result.deleted_rows}, changed ${result.changed_rows}.${backup}`,
     );
 
     state.totalRows = meta.total_rows;
@@ -391,12 +431,20 @@ async function writeJsonl() {
 }
 
 function bindEvents() {
-  els.prevBtn.addEventListener("click", () => moveBy(-1).catch(() => undefined));
+  els.prevBtn.addEventListener("click", () =>
+    moveBy(-1).catch(() => undefined),
+  );
   els.nextBtn.addEventListener("click", () => moveBy(1).catch(() => undefined));
-  els.commitBtn.addEventListener("click", () => writeJsonl().catch(() => undefined));
+  els.commitBtn.addEventListener("click", () =>
+    writeJsonl().catch(() => undefined),
+  );
   els.deleteBtn.addEventListener("click", toggleDelete);
-  els.revertRowBtn.addEventListener("click", () => revertCurrentRow().catch(() => undefined));
-  els.revertAllBtn.addEventListener("click", () => revertAllRows().catch(() => undefined));
+  els.revertRowBtn.addEventListener("click", () =>
+    revertCurrentRow().catch(() => undefined),
+  );
+  els.revertAllBtn.addEventListener("click", () =>
+    revertAllRows().catch(() => undefined),
+  );
 
   els.autoplayToggle.addEventListener("change", () => {
     if (els.autoplayToggle.checked) {
@@ -407,10 +455,18 @@ function bindEvents() {
     }
   });
 
-  els.pickTextBtn.addEventListener("click", () => applySourceChoice("text", true));
-  els.pickHypBtn.addEventListener("click", () => applySourceChoice("model_hypothesis", true));
-  els.pickLikelyTextBtn.addEventListener("click", () => applySourceChoice("likely_bad_text", true));
-  els.pickLikelyHypBtn.addEventListener("click", () => applySourceChoice("likely_bad_model_text", true));
+  els.pickTextBtn.addEventListener("click", () =>
+    applySourceChoice("text", true),
+  );
+  els.pickHypBtn.addEventListener("click", () =>
+    applySourceChoice("model_hypothesis", true),
+  );
+  els.pickLikelyTextBtn.addEventListener("click", () =>
+    applySourceChoice("likely_bad_text", true),
+  );
+  els.pickLikelyHypBtn.addEventListener("click", () =>
+    applySourceChoice("likely_bad_model_text", true),
+  );
 
   els.editInput.addEventListener("input", () => {
     state.dirty = true;
@@ -423,6 +479,12 @@ function bindEvents() {
       event.preventDefault();
       jumpToIndex().catch(() => undefined);
     }
+  });
+  els.indexInput.addEventListener("change", () => {
+    jumpToIndex().catch(() => undefined);
+  });
+  els.indexInput.addEventListener("blur", () => {
+    jumpToIndex().catch(() => undefined);
   });
 
   els.playBtn.addEventListener("click", () => {
