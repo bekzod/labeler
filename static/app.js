@@ -7,6 +7,7 @@ const state = {
   dirty: false,
   isLoading: false,
   autosaveTimer: null,
+  checked: false,
 };
 
 const els = {
@@ -164,8 +165,8 @@ function setStatus(text) {
   els.statusText.textContent = text;
 }
 
-function setCounts(edited, deleted) {
-  els.countText.textContent = `edited: ${edited}, deleted: ${deleted}`;
+function setCounts(edited, deleted, checked = 0) {
+  els.countText.textContent = `edited: ${edited}, deleted: ${deleted}, checked: ${checked}`;
 }
 
 function updateDeleteButton() {
@@ -209,7 +210,10 @@ function updateMatchHighlight(isMatch) {
 
 function updatePosition() {
   const total = state.totalRows || 0;
-  els.positionLabel.textContent = `${Math.min(state.index + 1, total)} / ${total}`;
+  const rowLabel = `${Math.min(state.index + 1, total)} / ${total}`;
+  els.positionLabel.textContent = state.checked
+    ? `${rowLabel} (checked)`
+    : rowLabel;
   els.indexInput.value = state.index + 1;
 }
 
@@ -220,8 +224,35 @@ function applySourceChoice(source, prefill = true) {
   if (prefill) {
     els.editInput.value = sourceText(state.row, source);
     state.dirty = true;
-    queueAutosave(100);
-    setStatus(`Prefilled from ${source}`);
+    const shouldMarkChecked =
+      source === "text" || source === "model_hypothesis";
+    queueAutosave(100, { markChecked: shouldMarkChecked });
+    setStatus(
+      shouldMarkChecked
+        ? `Prefilled from ${source} and marked checked`
+        : `Prefilled from ${source}`,
+    );
+  }
+}
+
+async function applyPrimarySourceAndAdvance(source) {
+  if (!state.row) return;
+  if (source !== "text" && source !== "model_hypothesis") return;
+
+  clearTimeout(state.autosaveTimer);
+
+  state.selectedSource = source;
+  updateSourceChoiceHighlight();
+  els.editInput.value = sourceText(state.row, source);
+  state.dirty = true;
+  setStatus(`Prefilled from ${source} and marked checked`);
+
+  const hasNext = state.index + 1 < state.totalRows;
+  if (hasNext) {
+    await moveBy(1);
+  } else {
+    await saveCurrentRow(true, { markChecked: true });
+    setStatus(`Marked row ${state.index + 1} as checked`);
   }
 }
 
@@ -230,6 +261,7 @@ function renderRowPayload(payload) {
   state.totalRows = payload.total_rows;
   state.row = payload.row;
   state.deleted = Boolean(payload.state.deleted);
+  state.checked = Boolean(payload.state.checked);
 
   const selected = payload.state.selected_source || "text";
   applySourceChoice(selected, false);
@@ -290,14 +322,16 @@ async function loadRow(index) {
   }
 }
 
-async function saveCurrentRow(silent = false) {
+async function saveCurrentRow(silent = false, options = {}) {
   if (!state.row) return;
+  const markChecked = Boolean(options.markChecked);
 
   const payload = {
     index: state.index,
     selected_source: state.selectedSource,
     edited_text: els.editInput.value,
     deleted: state.deleted,
+    mark_checked: markChecked,
   };
 
   try {
@@ -305,7 +339,13 @@ async function saveCurrentRow(silent = false) {
       method: "POST",
       body: JSON.stringify(payload),
     });
-    setCounts(data.result.edited_rows, data.result.deleted_rows);
+    state.checked = Boolean(data.result.checked);
+    updatePosition();
+    setCounts(
+      data.result.edited_rows,
+      data.result.deleted_rows,
+      data.result.checked_rows,
+    );
     state.dirty = false;
     if (!silent) setStatus(`Saved row ${state.index + 1}`);
   } catch (err) {
@@ -314,17 +354,24 @@ async function saveCurrentRow(silent = false) {
   }
 }
 
-function queueAutosave(delayMs = 450) {
+function queueAutosave(delayMs = 450, options = {}) {
   clearTimeout(state.autosaveTimer);
   state.autosaveTimer = setTimeout(() => {
-    saveCurrentRow(true).catch(() => undefined);
+    saveCurrentRow(true, options).catch(() => undefined);
   }, delayMs);
 }
 
 async function moveBy(delta) {
   const next = state.index + delta;
   if (next < 0 || next >= state.totalRows) return;
-  if (state.dirty) await saveCurrentRow(true);
+  const shouldMarkChecked =
+    delta > 0 &&
+    !state.deleted &&
+    (state.selectedSource === "text" ||
+      state.selectedSource === "model_hypothesis");
+  if (state.dirty || shouldMarkChecked) {
+    await saveCurrentRow(true, { markChecked: shouldMarkChecked });
+  }
   await loadRow(next);
 }
 
@@ -358,7 +405,11 @@ async function revertCurrentRow() {
       body: JSON.stringify({ index: state.index }),
     });
 
-    setCounts(data.meta.edited_rows, data.meta.deleted_rows);
+    setCounts(
+      data.meta.edited_rows,
+      data.meta.deleted_rows,
+      data.meta.checked_rows,
+    );
     await loadRow(state.index);
     setStatus(`Reverted row ${state.index + 1}`);
   } catch (err) {
@@ -379,7 +430,11 @@ async function revertAllRows() {
       body: JSON.stringify({}),
     });
 
-    setCounts(data.meta.edited_rows, data.meta.deleted_rows);
+    setCounts(
+      data.meta.edited_rows,
+      data.meta.deleted_rows,
+      data.meta.checked_rows,
+    );
     await loadRow(clampIndex(state.index, state.totalRows));
     setStatus("Reverted all uncommitted changes");
   } catch (err) {
@@ -411,7 +466,7 @@ async function writeJsonl() {
     });
 
     const { result, meta } = data;
-    setCounts(meta.edited_rows, meta.deleted_rows);
+    setCounts(meta.edited_rows, meta.deleted_rows, meta.checked_rows);
 
     const backup = result.backup_path ? ` backup: ${result.backup_path}` : "";
     setStatus(
@@ -456,10 +511,10 @@ function bindEvents() {
   });
 
   els.pickTextBtn.addEventListener("click", () =>
-    applySourceChoice("text", true),
+    applyPrimarySourceAndAdvance("text").catch(() => undefined),
   );
   els.pickHypBtn.addEventListener("click", () =>
-    applySourceChoice("model_hypothesis", true),
+    applyPrimarySourceAndAdvance("model_hypothesis").catch(() => undefined),
   );
   els.pickLikelyTextBtn.addEventListener("click", () =>
     applySourceChoice("likely_bad_text", true),
@@ -471,7 +526,7 @@ function bindEvents() {
   els.editInput.addEventListener("input", () => {
     state.dirty = true;
     setStatus("Editing...");
-    queueAutosave(450);
+    queueAutosave(450, { markChecked: false });
   });
 
   els.indexInput.addEventListener("keydown", (event) => {
@@ -553,13 +608,13 @@ function bindEvents() {
 
     if (key === "a") {
       event.preventDefault();
-      applySourceChoice("text", true);
+      applyPrimarySourceAndAdvance("text").catch(() => undefined);
       return;
     }
 
     if (key === "s") {
       event.preventDefault();
-      applySourceChoice("model_hypothesis", true);
+      applyPrimarySourceAndAdvance("model_hypothesis").catch(() => undefined);
       return;
     }
 
@@ -607,7 +662,7 @@ async function init() {
     const meta = data.meta;
 
     state.totalRows = meta.total_rows;
-    setCounts(meta.edited_rows, meta.deleted_rows);
+    setCounts(meta.edited_rows, meta.deleted_rows, meta.checked_rows);
 
     els.jsonlPath.textContent = meta.jsonl_path;
     els.indexInput.min = "1";

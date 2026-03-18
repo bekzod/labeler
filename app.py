@@ -39,6 +39,7 @@ class LabelStore:
         self.total_rows = len(self.offsets)
         self.edits: dict[str, dict] = {}
         self.deleted_indices: set[int] = set()
+        self.checked_indices: set[int] = set()
         self._load_state()
 
     def _build_offsets(self) -> list[int]:
@@ -52,9 +53,10 @@ class LabelStore:
                 offsets.append(pos)
         return offsets
 
-    def _sanitize_state(self, data: dict) -> tuple[dict[str, dict], set[int]]:
+    def _sanitize_state(self, data: dict) -> tuple[dict[str, dict], set[int], set[int]]:
         clean_edits: dict[str, dict] = {}
         clean_deleted: set[int] = set()
+        clean_checked: set[int] = set()
 
         edits = data.get("edits", {})
         if isinstance(edits, dict):
@@ -84,7 +86,13 @@ class LabelStore:
                 if isinstance(raw_idx, int) and 0 <= raw_idx < self.total_rows:
                     clean_deleted.add(raw_idx)
 
-        return clean_edits, clean_deleted
+        checked_indices = data.get("checked_indices", [])
+        if isinstance(checked_indices, list):
+            for raw_idx in checked_indices:
+                if isinstance(raw_idx, int) and 0 <= raw_idx < self.total_rows:
+                    clean_checked.add(raw_idx)
+
+        return clean_edits, clean_deleted, clean_checked
 
     def _load_state(self) -> None:
         if not self.state_path.exists():
@@ -99,9 +107,10 @@ class LabelStore:
         if data.get("jsonl_path") != str(self.jsonl_path):
             return
 
-        edits, deleted = self._sanitize_state(data)
+        edits, deleted, checked = self._sanitize_state(data)
         self.edits = edits
         self.deleted_indices = deleted
+        self.checked_indices = checked
 
     def _save_state_locked(self) -> None:
         payload = {
@@ -111,6 +120,7 @@ class LabelStore:
             "updated_at": datetime.utcnow().isoformat() + "Z",
             "edits": self.edits,
             "deleted_indices": sorted(self.deleted_indices),
+            "checked_indices": sorted(self.checked_indices),
         }
         tmp = self.state_path.with_name(self.state_path.name + ".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -133,6 +143,7 @@ class LabelStore:
                 "total_rows": self.total_rows,
                 "edited_rows": len(self.edits),
                 "deleted_rows": len(self.deleted_indices),
+                "checked_rows": len(self.checked_indices),
             }
 
     def get_row(self, index: int) -> dict:
@@ -158,10 +169,13 @@ class LabelStore:
                     "edited_text": edited_text,
                     "has_saved_edit": has_saved_edit,
                     "deleted": index in self.deleted_indices,
+                    "checked": index in self.checked_indices,
                 },
             }
 
-    def save_row(self, index: int, selected_source: str, edited_text: str, deleted: bool) -> dict:
+    def save_row(
+        self, index: int, selected_source: str, edited_text: str, deleted: bool, mark_checked: bool = False
+    ) -> dict:
         if selected_source not in VALID_SOURCES:
             raise ValueError("selected_source must be text or model_hypothesis")
 
@@ -175,6 +189,7 @@ class LabelStore:
                 selected_source == "text"
                 and not deleted
                 and edited_text_value == str(row.get("text", ""))
+                and not (mark_checked and selected_source in {"text", "model_hypothesis"})
             )
 
             if is_noop_edit:
@@ -188,8 +203,12 @@ class LabelStore:
 
             if deleted:
                 self.deleted_indices.add(index)
+                self.checked_indices.discard(index)
             else:
                 self.deleted_indices.discard(index)
+
+            if mark_checked and selected_source in {"text", "model_hypothesis"} and not deleted:
+                self.checked_indices.add(index)
 
             self._save_state_locked()
 
@@ -197,6 +216,8 @@ class LabelStore:
                 "index": index,
                 "edited_rows": len(self.edits),
                 "deleted_rows": len(self.deleted_indices),
+                "checked_rows": len(self.checked_indices),
+                "checked": index in self.checked_indices,
             }
 
     def reset_row(self, index: int) -> dict:
@@ -206,12 +227,14 @@ class LabelStore:
 
             self.edits.pop(str(index), None)
             self.deleted_indices.discard(index)
+            self.checked_indices.discard(index)
             self._save_state_locked()
 
             return {
                 "index": index,
                 "edited_rows": len(self.edits),
                 "deleted_rows": len(self.deleted_indices),
+                "checked_rows": len(self.checked_indices),
             }
 
     def reset_all(self) -> dict:
@@ -221,6 +244,7 @@ class LabelStore:
 
             self.edits.clear()
             self.deleted_indices.clear()
+            self.checked_indices.clear()
             self._save_state_locked()
 
             return {
@@ -228,6 +252,7 @@ class LabelStore:
                 "cleared_deleted": cleared_deleted,
                 "edited_rows": len(self.edits),
                 "deleted_rows": len(self.deleted_indices),
+                "checked_rows": len(self.checked_indices),
             }
 
     def _resolve_output_path(self, provided: str | None, default_path: Path) -> Path:
@@ -279,6 +304,7 @@ class LabelStore:
             changed_rows = 0
             edits = dict(self.edits)
             deleted_indices = set(self.deleted_indices)
+            checked_indices = set(self.checked_indices)
 
             try:
                 with self.jsonl_path.open("r", encoding="utf-8") as source, tmp_output.open(
@@ -317,14 +343,37 @@ class LabelStore:
                             deleted_rows += 1
                             continue
 
+                        row_changed = False
+                        output_row = row
+
                         if edit:
                             new_text = str(edit.get("edited_text", ""))
-                            if row.get("text") != new_text:
-                                row = dict(row)
-                                row["text"] = new_text
-                                changed_rows += 1
+                            if output_row.get("text") != new_text:
+                                output_row = dict(output_row)
+                                output_row["text"] = new_text
+                                row_changed = True
 
-                        out.write(json.dumps(row, ensure_ascii=False, allow_nan=True) + "\n")
+                        if idx in checked_indices:
+                            checked_value = (
+                                str(edit.get("edited_text", ""))
+                                if edit
+                                else str(output_row.get("text", ""))
+                            )
+                            if output_row.get("text") != checked_value:
+                                if output_row is row:
+                                    output_row = dict(output_row)
+                                output_row["text"] = checked_value
+                                row_changed = True
+                            if output_row.get("model_hypothesis") != checked_value:
+                                if output_row is row:
+                                    output_row = dict(output_row)
+                                output_row["model_hypothesis"] = checked_value
+                                row_changed = True
+
+                        if row_changed:
+                            changed_rows += 1
+
+                        out.write(json.dumps(output_row, ensure_ascii=False, allow_nan=True) + "\n")
                         kept_rows += 1
                 tmp_output.replace(target_output)
 
@@ -355,6 +404,7 @@ class LabelStore:
                 # In-place write changes row numbering, so state must be reset.
                 self.edits.clear()
                 self.deleted_indices.clear()
+                self.checked_indices.clear()
                 self.offsets = self._build_offsets()
                 self.total_rows = len(self.offsets)
                 self._save_state_locked()
@@ -489,7 +539,10 @@ class LabelingHandler(BaseHTTPRequestHandler):
                 selected_source = str(payload.get("selected_source", "text"))
                 edited_text = str(payload.get("edited_text", ""))
                 deleted = bool(payload.get("deleted", False))
-                result = self.store.save_row(idx, selected_source, edited_text, deleted)
+                mark_checked = bool(payload.get("mark_checked", False))
+                result = self.store.save_row(
+                    idx, selected_source, edited_text, deleted, mark_checked=mark_checked
+                )
                 self._send_json({"ok": True, "result": result})
             except (ValueError, TypeError, IndexError, json.JSONDecodeError) as exc:
                 self._send_json({"ok": False, "error": str(exc)}, code=400)
